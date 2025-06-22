@@ -1,0 +1,305 @@
+import cv2
+import requests
+import numpy as np
+import pytesseract
+import matplotlib.pyplot as plt
+import matplotlib
+import imutils
+import RPi.GPIO as gpio
+import threading
+import time
+from time import sleep
+from gpiozero import OutputDevice
+import firebase_admin
+from firebase_admin import credentials, db
+import sys
+from datetime import datetime
+import base64
+from PIL import Image
+from io import BytesIO
+import board
+import busio
+import adafruit_ads1x15.ads1115 as ADS
+from adafruit_ads1x15.analog_in import AnalogIn
+
+API_URL = "https://api.platerecognizer.com/v1/plate-reader/"
+API_TOKEN = "----------------------------------"  # your API token
+
+gpio.setmode(gpio.BCM)
+
+cred = credentials.Certificate('/home/hamit/Desktop/plaka-2e02d-firebase-adminsdk-fbsvc-d0e8fc31ae.json')  # Gerekli JSON dosyasının yolu
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://plaka-2e02d-default-rtdb.firebaseio.com/'
+})
+
+frequency = 2500 
+duration = 1000
+
+gpio.setmode(gpio.BCM)
+gpio.setwarnings(False)
+trig=23
+echo=24
+gpio.setup(trig,gpio.OUT)
+gpio.setup(echo,gpio.IN)
+s=1
+a=0
+def kapıacılıyor():
+    IN1 = OutputDevice(14)
+    IN2 = OutputDevice(15)
+    IN3 = OutputDevice(18)
+    IN4 = OutputDevice(8)
+    step_sequence = [
+        [1, 0, 0, 0],
+        [1, 1, 0, 0],
+        [0, 1, 0, 0],
+        [0, 1, 1, 0],
+        [0, 0, 1, 0],
+        [0, 0, 1, 1],
+        [0, 0, 0, 1],
+        [1, 0, 0, 1]
+        ]
+
+    def set_step(w1, w2, w3, w4):
+        IN1.value = w1
+        IN2.value = w2
+        IN3.value = w3
+        IN4.value = w4
+
+    def step_motor(steps, direction=1, delay=0.005):
+        for _ in range(steps):
+            for step in (step_sequence if direction > 0 else reversed(step_sequence)):
+                set_step(*step)
+                sleep(delay)
+
+    try:
+        steps = 150
+        direction = 1
+        step_motor(steps, direction)
+        sleep(2)
+        direction = -1
+        step_motor(steps, direction)
+    except KeyboardInterrupt:
+        print("Program stopped by user")
+
+    gpio.setmode(gpio.BCM)
+    gpio.setwarnings(False)
+    gpio.setup(trig,gpio.OUT)
+    gpio.setup(echo,gpio.IN)
+    
+def veritabaninaveriekleme(plaka1,frame1):
+    result = db.reference('kisiler_tablo').get()  # Tüm kişileri çek
+    kisi_ad = ""
+    kisi_soyad = ""
+    for key, person in result.items():
+        if (person['kisi_plaka']).replace(" ", "") ==plaka1:
+            kisi_ad = person['kisi_ad']
+            kisi_soyad = person['kisi_soyad']
+            break
+    if kisi_ad == "" or kisi_soyad == "":
+        kisi_ad = "Bilinmiyor"
+        kisi_soyad = "Bilinmiyor"
+    current_time = datetime.now()
+    year = current_time.year
+    month = current_time.month
+    day = current_time.day
+    hour = current_time.hour
+    minute = current_time.minute
+
+    def image_to_base64(frame2):
+        frame_rgb = cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(frame_rgb)
+        buffered = BytesIO()
+        pil_image.save(buffered, format="JPEG")
+        img_byte = buffered.getvalue()
+        img_base64 = base64.b64encode(img_byte).decode("utf-8")
+        return img_base64
+
+    img_base64 = image_to_base64(frame1)
+
+    data = {
+        "resim metni": img_base64,
+        "plaka": plaka1,
+        "tarih": f"{year}/{month}/{day}",
+        "saat": f"{hour}:{minute}",
+        "isim": kisi_ad,
+        "soyisim": kisi_soyad
+    }
+
+    try:
+        db.reference('FOTORAFLAR').push(data)
+        print(f"Veri Firebase'e gönderildi: {data}")
+    except:
+        print("Veritabanına gönderilemedi")
+    kisi_ad=""
+    kisi_soyad=""
+plate=""
+
+def send_to_plate_recognizer(image):
+    _, img_encoded = cv2.imencode('.jpg', image)
+    img_bytes = img_encoded.tobytes()
+
+    headers = {
+        'Authorization': f'Token {API_TOKEN}',
+    }
+    files = {
+        'upload': ('image.jpg', img_bytes, 'image/jpeg'),
+    }
+
+    try:
+        response = requests.post(API_URL, headers=headers, files=files)
+        result = response.json()
+        return result
+    except Exception as e:
+        print("API isteği başarısız:", e)
+        return None
+
+
+def mod1anasema():
+     print("araba göründü tanımlandı kapı açıldı 1. mod")
+     processing=False
+     sayac=0
+     res = db.reference( 'kisiler_tablo').get()
+     plakalar=[]
+     cleaned_space_plakalar=[]
+     if res:
+         for key, person in res.items():
+          
+             if 'kisi_plaka' in person:
+                 plakalar.append(person['kisi_plaka'])    
+             else:
+                 print(f"Plaka bilgisi mevcut değil: {key}")
+     else:
+         print("Veri bulunamadı.")
+
+     silinecek_harf = " "
+     yeni_dizi = [eleman.replace(silinecek_harf, "") for eleman in plakalar]
+     print(yeni_dizi)
+     url = "http://192.168.113.13/800x600.jpg"
+
+     while True:
+         sayac=sayac+1
+         if sayac>50:
+             print("Plaka Okunamadı.")
+             cap.release()
+             cv2.destroyAllWindows()
+             aracıgor()
+         try:
+             text=""
+             cap=cv2.VideoCapture(url)
+             kontrol=False
+             sayac=sayac+1
+             if not cap.isOpened():
+                print("Video kaynağı açılamadı!")
+             else:
+                pass
+             
+             ret,frame=cap.read()
+             
+             if not ret:
+                print("Kare alınamadı!")
+                
+             else:
+                 pass
+             
+             cv2.imshow("Kamera Görüntüsü",frame)
+             key=cv2.waitKey(1) & 0xFF
+             
+             if not processing:
+                 processing=True
+                 print("Plaka Okunuyor...")
+                 result=send_to_plate_recognizer(frame)
+                 
+                 if result:
+                     try:
+                         plate=result['results'][0]['plate'].upper()
+                         print(f"Tespit edilen plaka: {plate}")
+                     except:
+                         print("Plaka tespit edilemedi.")
+                 else:
+                     print("API yanıtı alınamadı.")
+                 processing=False
+                 
+                 
+             if key==ord('q'):
+                 print("Program sonlandırılıyor...")
+                 break
+             if (plate!="" or plate!=" "):
+                 plate=plate.replace(" ", "")
+                 for a in yeni_dizi:
+                     if (a in plate):
+                         
+                         plate=a
+                         print(plate)
+                         print("Doğru")
+                         cap.release()
+                         cv2.destroyAllWindows()
+                         veritabaninaveriekleme(plate,frame)
+                         kontrol=True
+                         break
+             if kontrol==True:
+                 break
+         except:
+             pass
+     
+     if kontrol==True:
+         kapıacılıyor()
+     
+def mod2anasema():
+    kapıacılıyor()
+    
+def mod3anasema():
+    print("akapı her türlü kapalı")
+ 
+def kapıac():
+    pass
+
+def modsorgu():
+    global s
+    while True:
+        res=db.reference('mod_kontrol').get()
+        mod_degeri = res['mod']
+        if mod_degeri =='1' :
+           print("mod1anasema fonkiyonunda çalışılmalı")   
+           mod1anasema()
+        elif mod_degeri == '2' :
+            print("mod2anasema fonksiyonunda çalışılmalı")
+            mod2anasema()
+        elif mod_degeri =='3' :
+            print("mod3anasema fonksiyonunu öne sür")
+            mod3anasema()
+        else:
+            print("Mod bulunamadı")
+        time.sleep(1)
+        break
+
+def aracıgor():
+    print("Mesafe Alınıyor")
+    while True:
+        gpio.output(trig,gpio.LOW)
+        sleep(0.5)
+        gpio.output(trig,gpio.HIGH)
+        sleep(0.0001)
+        gpio.output(trig,gpio.LOW)
+    
+        while gpio.input(echo) == 0:
+            start = time.time()
+    
+        while gpio.input(echo) == 1:
+            end = time.time()
+        
+        sure = end -start
+        uzaklik = sure / 0.000058
+        uzaklikKontrol(uzaklik)
+        print("uzaklik : ",uzaklik, " cm")
+
+def uzaklikKontrol(uzaklik1):
+    if (uzaklik1<6.5):
+        modsorgu()
+    
+def cıkısanasema():
+    """burada aracın çıkış yaparkenki kodları olacak aracı gor fonk ile beraber çalışabilir"""
+    print("araba çıkış yaptı")
+    
+while 1:
+    aracıgor()
+ 
